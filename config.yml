@@ -1,0 +1,9 @@
+language: en
+pipeline:
+ - name: "WhitespaceTokenizer"
+policies:
+  - name: "FallbackPolicy"
+    nlu_threshold: 0
+    ambiguity_threshold: 0
+    core_threshold: 0
+    fallback_action_name: 'action_echo'
