@@ -6,121 +6,113 @@ from rasa.core.channels.channel import (
     QueueOutputChannel
 )
 from sanic import Blueprint, response
+from sanic.request import Request
+from sanic.response import HTTPResponse
 import rasa
 import logging
 import json
-import inspect
 import asyncio
+import re
+import requests
 from asyncio import Queue, CancelledError
 from typing import Text, Dict, Any, Optional, Callable, Awaitable
 
 logger = logging.getLogger(__name__)
 
+
+class ChatworkOutput(OutputChannel):
+    @classmethod
+    def name(cls):
+        return "chatwork"
+
+    def __init__(self, token_api: Text, room_id: int) -> None:
+        self.room_id = room_id
+        self.header = {"X-ChatWorkToken": token_api}
+
+    async def send_text_message(
+        self, recipient_id: Optional[Text], text: Text, **kwargs: Any
+    ) -> None:
+        uri = "https://api.chatwork.com/v2/rooms/" + str(self.room_id) + "/messages"
+        data = {"body": text}
+        req = requests.post(uri, headers=self.header, data=data)
+
+
 class ChatworkInput(InputChannel):
-    """A custom http input channel.
-
-    This implementation is the basis for a custom implementation of a chat
-    frontend. You can customize this to send messages to Rasa Core and
-    retrieve responses from the agent."""
-
     @classmethod
     def name(cls) -> Text:
         return "chatwork"
 
+    @classmethod
+    def from_credentials(cls, credentials):
+        if not credentials:
+            cls.raise_missing_credentials_exception()
+        return cls(credentials.get("api_token"))
+
+    def __init__(self, api_token: Text) -> None:
+        self.api_token = api_token
+
     @staticmethod
-    async def on_message_wrapper(
-        on_new_message: Callable[[UserMessage], Awaitable[Any]],
-        text: Text,
-        queue: Queue,
-        sender_id: Text,
-        input_channel: Text,
-        metadata: Optional[Dict[Text, Any]],
-    ) -> None:
-        collector = QueueOutputChannel(queue)
+    def _sanitize_user_message(text):
+        """
+        Remove all tags.
+        """
+        for regex, replacement in [
+            # to messages
+            (r"\[[Tt][Oo]:\d+\]", ""),
+            # reply messages
+            (r"\[[Rr][Pp] aid=[^]]+\]", ""),
+            (r"\[Reply aid=[^]]+\]", ""),
+        ]:
+            text = re.sub(regex, replacement, text)
 
-        message = UserMessage(
-            text, collector, sender_id, input_channel=input_channel, metadata=metadata
-        )
-        await on_new_message(message)
-
-        await queue.put("DONE")  # pytype: disable=bad-return-type
-
-    async def _extract_sender(self, req: Request) -> Optional[Text]:
-        return req.json.get("sender", None)
-
-    # noinspection PyMethodMayBeStatic
-    def _extract_message(self, req: Request) -> Optional[Text]:
-        return req.json.get("message", None)
-
-    def _extract_input_channel(self, req: Request) -> Text:
-        return req.json.get("input_channel") or self.name()
-
-    def stream_response(
-        self,
-        on_new_message: Callable[[UserMessage], Awaitable[None]],
-        text: Text,
-        sender_id: Text,
-        input_channel: Text,
-        metadata: Optional[Dict[Text, Any]],
-    ) -> Callable[[Any], Awaitable[None]]:
-        async def stream(resp: Any) -> None:
-            q = Queue()
-            task = asyncio.ensure_future(
-                self.on_message_wrapper(
-                    on_new_message, text, q, sender_id, input_channel, metadata
-                )
-            )
-            result = None  # declare variable up front to avoid pytype error
-            while True:
-                result = await q.get()
-                if result == "DONE":
-                    break
-                else:
-                    await resp.write(json.dumps(result) + "\n")
-            await task
-
-        return stream  # pytype: disable=bad-return-type
+        return text.strip()
 
     def blueprint(
         self, on_new_message: Callable[[UserMessage], Awaitable[None]]
     ) -> Blueprint:
-        custom_webhook = Blueprint(
-            "custom_webhook_{}".format(type(self).__name__),
-            inspect.getmodule(self).__name__,
+        custom_webhook = Blueprint("chatwork_webhook", "chatwork"
         )
 
-        # noinspection PyUnusedLocal
         @custom_webhook.route("/", methods=["GET"])
         async def health(request: Request) -> HTTPResponse:
-            return response.json({"status": "ok"})
+            return response.json({"signature_tag": "o' kawaii koto."})
 
         @custom_webhook.route("/webhook", methods=["POST"])
         async def receive(request: Request) -> HTTPResponse:
-            sender_id = await self._extract_sender(request)
-            text = self._extract_message(request)
+            
+            content = request.json["webhook_event"]
+
+            sender_id = content["from_account_id"]
+            room_id = content["room_id"]
+            message_id = content["message_id"]
+            text = content["body"]
+            metadata = {
+                "sender_id": sender_id,
+                "room_id": room_id,
+                "message_id": message_id,
+                "text": self._sanitize_user_message(text)
+            }
+
             should_use_stream = rasa.utils.endpoints.bool_arg(
                 request, "stream", default=False
             )
-            input_channel = self._extract_input_channel(request)
-            metadata = self.get_metadata(request)
 
             if should_use_stream:
                 return response.stream(
                     self.stream_response(
-                        on_new_message, text, sender_id, input_channel, metadata
+                        on_new_message, text, sender_id, room_id, metadata
                     ),
                     content_type="text/event-stream",
                 )
             else:
-                collector = CollectingOutputChannel()
-                # noinspection PyBroadException
+                out_channel = self.get_output_channel(room_id)
                 try:
                     await on_new_message(
                         UserMessage(
                             text,
-                            collector,
+                            out_channel,
                             sender_id,
-                            input_channel=input_channel,
+                            input_channel=room_id,
                             metadata=metadata,
                         )
                     )
@@ -134,6 +126,9 @@ class ChatworkInput(InputChannel):
                         "An exception occured while handling "
                         "user message '{}'.".format(text)
                     )
-                return response.json(collector.messages)
+                return response.json("alles gut 👌")
 
         return custom_webhook
+    
+    def get_output_channel(self, room_id) -> OutputChannel:
+        return ChatworkOutput(self.api_token, room_id)
