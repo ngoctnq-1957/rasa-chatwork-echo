@@ -14,6 +14,7 @@ import json
 import asyncio
 import re
 import requests
+import base64, hmac, hashlib
 from asyncio import Queue, CancelledError
 from typing import Text, Dict, Any, Optional, Callable, Awaitable
 
@@ -46,10 +47,11 @@ class ChatworkInput(InputChannel):
     def from_credentials(cls, credentials):
         if not credentials:
             cls.raise_missing_credentials_exception()
-        return cls(credentials.get("api_token"))
+        return cls(credentials.get("api_token"), credentials.get("secret_token"))
 
-    def __init__(self, api_token: Text) -> None:
+    def __init__(self, api_token: Text, secret_token: Text) -> None:
         self.api_token = api_token
+        self.secret_token = secret_token
 
     @staticmethod
     def _sanitize_user_message(text):
@@ -77,8 +79,22 @@ class ChatworkInput(InputChannel):
         async def health(request: Request) -> HTTPResponse:
             return response.json({"signature_tag": "o' kawaii koto."})
 
+        def validate_request(request):
+            # Check the X-Hub-Signature header to make sure this is a valid request.
+            chatwork_signature = request.headers.get('X-ChatWorkWebhookSignature', '')
+            signature = hmac.new(base64.b64decode(bytes(self.secret_token, encoding='utf-8')),
+                                 request.body,
+                                 hashlib.sha256)
+            expected_signature = base64.b64encode(signature.digest())
+
+            return hmac.compare_digest(bytes(chatwork_signature, encoding='utf-8'),
+                                       expected_signature)
+
         @custom_webhook.route("/webhook", methods=["POST"])
         async def receive(request: Request) -> HTTPResponse:
+
+            if not validate_request(request):
+                return response.json("you've been a very bad boy!", status=400)
             
             content = request.json["webhook_event"]
 
