@@ -108,41 +108,29 @@ class ChatworkInput(InputChannel):
                 "message_id": message_id,
                 "text": self._sanitize_user_message(text)
             }
-
-            should_use_stream = rasa.utils.endpoints.bool_arg(
-                request, "stream", default=False
-            )
-
-            if should_use_stream:
-                return response.stream(
-                    self.stream_response(
-                        on_new_message, text, sender_id, room_id, metadata
-                    ),
-                    content_type="text/event-stream",
+            
+            out_channel = self.get_output_channel(room_id)
+            try:
+                await on_new_message(
+                    UserMessage(
+                        text,
+                        out_channel,
+                        sender_id,
+                        input_channel=room_id,
+                        metadata=metadata,
+                    )
                 )
-            else:
-                out_channel = self.get_output_channel(room_id)
-                try:
-                    await on_new_message(
-                        UserMessage(
-                            text,
-                            out_channel,
-                            sender_id,
-                            input_channel=room_id,
-                            metadata=metadata,
-                        )
-                    )
-                except CancelledError:
-                    logger.error(
-                        "Message handling timed out for "
-                        "user message '{}'.".format(text)
-                    )
-                except Exception:
-                    logger.exception(
-                        "An exception occured while handling "
-                        "user message '{}'.".format(text)
-                    )
-                return response.json("alles gut 👌")
+            except CancelledError:
+                logger.error(
+                    "Message handling timed out for "
+                    "user message '{}'.".format(text)
+                )
+            except Exception:
+                logger.exception(
+                    "An exception occured while handling "
+                    "user message '{}'.".format(text)
+                )
+            return response.json("alles gut 👌")
 
         return custom_webhook
     
